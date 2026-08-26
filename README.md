@@ -1,99 +1,100 @@
 # VCM Preprocessing Upgrade 5
 
-Bo cong cu preprocessing va toi uu hoa cho **Video Coding for Machines (VCM)**. Muc tieu khong phai la toi da PSNR mot cach mu quang, ma la giu chat luong tac vu AI sau khi encode/decode trong khi giam bitrate.
+Bộ công cụ preprocessing và tối ưu hóa cho **Video Coding for Machines (VCM)**. Mục tiêu là giữ chất lượng tác vụ AI sau khi encode/decode, đồng thời giảm bitrate và chi phí tính toán.
 
-## Metric nao can toi uu?
+## Chạy thử trên Kaggle với Kinetics-400-5%
 
-Chon metric theo tac vu downstream va bao cao cung voi bitrate (kbps), do tre va chi phi preprocessing:
+Tạo một notebook Kaggle bật Internet, sau đó chạy các cell sau:
 
-| Nhom | Metric khuyen nghi | Y nghia |
+```bash
+!git clone https://github.com/wagur1/preprocessing_upgrade_5.git /kaggle/working/preprocessing_upgrade_5
+%cd /kaggle/working/preprocessing_upgrade_5
+!pip install -e ".[image]"
+!python kaggle/run_kaggle_vcm.py --data /kaggle/input/kinetics400-5per --videos 8
+```
+
+Nếu tên dataset của bạn khác, tìm thư mục thực tế bằng:
+
+```bash
+!find /kaggle/input -maxdepth 2 -type f -name "*.mp4" | head
+```
+
+Script `kaggle/run_kaggle_vcm.py` sẽ:
+
+1. Tìm các video MP4 trong thư mục dataset và lấy tối đa `--videos` video đầu tiên.
+2. Encode mỗi video bằng H.264 `libx264` ở QP 22, 27, 32, 37.
+3. Tạo nhánh preprocessing mẫu bằng `hqdn3d + eq + unsharp` rồi encode cùng QP.
+4. Đo bitrate, PSNR và SSIM xấp xỉ trên các frame mẫu.
+5. Tính BD-rate. Giá trị âm nghĩa là tiết kiệm bitrate so với baseline.
+
+Kết quả được ghi vào `/kaggle/working/vcm_results.json`. Đây là **smoke benchmark** để kiểm tra pipeline. PSNR/SSIM chỉ là proxy thị giác; kết quả VCM cần thay hàm `quality()` bằng đầu ra model AI (mAP, mIoU, HOTA...) trên nhãn tương ứng.
+
+## Metric nên tối ưu
+
+| Tác vụ | Metric chính | Metric bổ trợ |
 |---|---|---|
-| Detection | mAP@0.5, mAP@[.5:.95], Recall@N | Do dung vi tri va ty le phat hien vat the |
-| Segmentation | mIoU, Dice/F1, boundary F-score | Do trung mask va bien doi tuong |
-| Tracking | HOTA, IDF1, ID switches | Can bang localization va duy tri identity |
-| Re-identification | mAP, Rank-1/5 | Kha nang truy hoi dung doi tuong |
-| Pose/keypoint | OKS-mAP, PCK | Do chinh xac diem khop |
-| Perception tong quat | CLIP/Image embedding cosine | Bao ton ngu nghia/feature |
-| Tin hieu anh bo tro | PSNR-Y, SSIM, MS-SSIM, VMAF | Chi nen dung lam guardrail, khong phai muc tieu duy nhat |
+| Detection | mAP@0.5, mAP@[.5:.95] | Recall@N, precision |
+| Segmentation | mIoU, Dice/F1 | Boundary F-score |
+| Tracking | HOTA, IDF1 | Số ID switch, MOTA |
+| Re-identification | mAP, Rank-1/5 | CMC curve |
+| Pose/keypoint | OKS-mAP, PCK | AP theo từng khớp |
+| Perception tổng quát | Cosine embedding/CLIP | Top-k accuracy |
+| Chất lượng ảnh | VMAF, MS-SSIM, PSNR-Y | SSIM-Y |
 
-Metric chinh nen la metric AI (vi du mAP hoac mIoU). PSNR/SSIM co the tang nhung mAP giam khi cac canh/texture quan trong bi lam mo.
+Metric chính nên là metric AI của tác vụ. PSNR hoặc SSIM có thể tăng nhưng mAP giảm nếu preprocessing làm mất cạnh, texture hoặc chi tiết nhỏ quan trọng với model.
 
-## BD-rate va ham muc tieu
+## BD-rate và tối ưu đa mục tiêu
 
-Voi moi cau hinh preprocessing, can tao RD points theo cac QP hoac bitrate giong nhau:
+Mỗi cấu hình preprocessing phải được đánh giá ở cùng tập QP hoặc bitrate để tạo các điểm `(bitrate_kbps, task_quality)`. `bd_rate(reference, test)` fit đa thức bậc hai trên `ln(bitrate)` theo quality rồi tích phân trên miền giao nhau. Kết quả âm, ví dụ `-18.4%`, nghĩa là cần ít bitrate hơn để đạt cùng chất lượng. `bd_quality` đo mức tăng quality tại cùng bitrate.
 
-```text
-(bitrate_kbps, task_quality)
-```
+Với một operating point, `RandomSearch` tối ưu `w_quality * task_quality - w_rate * log(1 + bitrate_kbps)`. Với toàn bộ đường cong RD, dùng `BDRateSearch` để tối thiểu hóa BD-rate trực tiếp. Khi benchmark thực tế nên theo dõi thêm latency (ms/frame), bộ nhớ, năng lượng và độ ổn định theo video.
 
-`bd_rate(reference, test)` fit da thuc bac 2 tren `ln(rate)` theo quality va tich phan tren khoang giao nhau. Ket qua am nghia la test tiet kiem bitrate (vi du `-18.4%`). `bd_quality` do muc tang quality tai cung bitrate. Day la cach bao cao nen dung trong paper/benchmark, khong chi so sanh mot QP.
-
-Optimizer dung objective:
-
-```text
-score = w_quality * task_quality - w_rate * log(1 + bitrate_kbps)
-```
-
-Trong benchmark day du, hay toi uu Pareto giua `BD-rate`, metric AI, latency (ms/frame), memory va energy. Khong gop cac metric co don vi khac nhau neu chua normalize theo baseline.
-
-## Cai dat va chay
+## Cài đặt và API
 
 ```bash
 pip install -e ".[image]"
-vcm-preprocess frames/processed frames/out --config config.json
 ```
-
-Config mau:
-
-```json
-{"denoise": 0.15, "sharpen": 0.20, "contrast": 1.05,
- "saturation": 1.0, "luma_gain": 1.0, "chroma_subsample": false}
-```
-
-API Python:
 
 ```python
 from vcm_preprocess import PreprocessConfig, preprocess_sequence, RandomSearch, BDRateSearch
 preprocess_sequence("frames", "frames_pp", PreprocessConfig())
 
-def evaluator(cfg):
-    # 1) preprocess_sequence; 2) encode/decode bang VTM/x265/AV1;
-    # 3) chay model AI; 4) tra task_quality va bitrate_kbps.
+def evaluator(config):
+    # preprocess -> encode/decode -> chạy model AI
     return {"task_quality": 0.72, "bitrate_kbps": 500}
 
 result = RandomSearch(evaluator, iterations=100, seed=7).run()
 print(result.config, result.metrics)
 ```
 
-Neu muon toi uu truc tiep BD-rate tren nhieu diem QP:
+Tối ưu trực tiếp BD-rate:
 
 ```python
 reference = [(120, .55), (220, .63), (410, .70), (820, .75)]
-def rd_evaluator(cfg):
-    # Tra ve [(bitrate_kbps, mAP), ...] sau khi encode o cac QP co dinh.
+def rd_evaluator(config):
     return [(110, .55), (205, .63), (390, .70), (790, .75)]
 result = BDRateSearch(reference, rd_evaluator, iterations=100).run()
-print(result.metrics["bd_rate_percent"])  # am = tiet kiem bitrate
+print(result.metrics["bd_rate_percent"])
 ```
 
-`evaluator` la hop dong duy nhat voi codec/model; co the them `latency_ms`, `vmaf`, `psnr_y` de log va phan tich. Xem `examples/toy_optimize.py` cho evaluator gia lap va `examples/rd_points.json` cho dinh dang RD.
+CLI xử lý một thư mục frame: `vcm-preprocess frames/ frames_pp/ --config config.json`.
 
-## Quy trinh benchmark de xuat
+## Quy trình benchmark đề xuất
 
-1. Chia train/validation/test theo video, khong tron frame giua cac tap.
-2. Chay cung codec, preset, GOP, resolution va cac QP (thuong 22/27/32/37).
-3. Do bitrate trung binh, task metric tren tat ca frame, latency preprocessing + decode + inference.
-4. Tinh BD-rate tren quality AI; bao cao them BD-rate theo VMAF/PSNR de phat hien suy giam thi giac.
-5. Chon diem Pareto va xac nhan tren test set mot lan duy nhat.
+1. Chia train/validation/test theo **video**, không trộn frame giữa các tập.
+2. Giữ cố định codec, preset, GOP, độ phân giải, chroma format và các QP (thường 22/27/32/37).
+3. Đo bitrate trung bình, metric AI trên toàn bộ frame, latency preprocessing + decode + inference.
+4. Tính BD-rate trên metric AI; báo cáo thêm BD-rate theo VMAF/PSNR-Y để phát hiện suy giảm thị giác.
+5. Chọn các điểm Pareto và chỉ xác nhận một lần trên test set.
 
-## Ghi chu ky thuat
+## Ghi chú
 
-- Pillow la dependency tuy chon; metric va optimizer chay duoc trong Python stdlib. Yeu cau Python 3.10+.
-- `denoise`, `sharpen` nam trong [0,1]; contrast [0.8,1.3], saturation [0.7,1.3], luma_gain [0.85,1.15].
-- Pipeline hien tai la baseline CPU, khong thay the learned preprocessor. De dat ket qua tot nhat, co the thay `preprocess_image` bang ONNX/TensorRT model va giu nguyen evaluator/optimizer.
-- BD-rate khong co y nghia neu hai duong RD khong co khoang quality giao nhau; khi do ham se bao loi de tranh ket qua gia.
+- Yêu cầu Python 3.10+. Pillow là dependency tùy chọn; metric và optimizer dùng Python standard library.
+- `denoise`, `sharpen` nằm trong [0, 1]; `contrast` [0.8, 1.3]; `saturation` [0.7, 1.3]; `luma_gain` [0.85, 1.15].
+- Pipeline hiện tại là baseline CPU, không phải learned preprocessor. Có thể thay `preprocess_image` bằng mô hình ONNX/TensorRT mà không đổi evaluator và optimizer.
+- BD-rate không có ý nghĩa nếu hai đường RD không có miền quality giao nhau; hàm sẽ báo lỗi để tránh kết quả sai.
 
-## Kiem thu
+## Kiểm thử
 
 ```bash
 python -m pytest -q
